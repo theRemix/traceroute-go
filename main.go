@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"log"
 	"net"
+	"time"
 
+	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
 
@@ -84,34 +87,85 @@ func buildICMPRequest(destination net.IP, ttl int) (*ipv4.Header, []byte) {
 	return &ip, icmp
 }
 
+func sendICMP(r *ipv4.RawConn, destination net.IP, ttl int) {
+
+	res := make(chan net.IP, 1)
+	// timeout := make(chan string, 1)
+	go func() {
+		ipHeader, icmpReq := buildICMPRequest(destination, ttl)
+
+		cmReq := &ipv4.ControlMessage{}
+
+		if err := r.WriteTo(ipHeader, icmpReq, cmReq); err != nil {
+			log.Println(err)
+		}
+
+		responseBytes := make([]byte, 1500)
+		responseHeader, cmRes, peer, err := r.ReadFrom(responseBytes)
+		if err != nil {
+			log.Println(err)
+		}
+
+		rm, err := icmp.ParseMessage(1, cmRes)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("type", rm.Type)
+		switch rm.Type {
+		case ipv4.ICMPTypeTimeExceeded:
+			log.Println("hop", peer.String())
+			// names, _ := net.LookupAddr(peer.String())
+			// fmt.Printf("%d\t%v %+v %v\n\t%+v\n", i, peer, names, rtt, cm)
+		case ipv4.ICMPTypeEchoReply:
+			log.Println("end", peer.String())
+			// names, _ := net.LookupAddr(peer.String())
+			// fmt.SPrintf("%d\t%v %+v %v\n\t%+v\n", i, peer, names, rtt, cm)
+			// return
+		case ipv4.ICMPTypeDestinationUnreachable:
+			log.Println("dest unreachable", peer.String())
+		default:
+			log.Printf("unknown ICMP message: %+v\n", rm)
+		}
+
+		res <- responseHeader.Src
+	}()
+
+	select {
+	case res := <-res:
+		fmt.Println(res)
+	case <-time.After(5 * time.Second):
+		fmt.Println("timeout", ttl)
+	}
+
+}
+
 func main() {
 
-	destination := net.IP{8, 8, 8, 8}
+	// destination := net.IP{8, 8, 8, 8}
+	destination := net.IP{104, 20, 40, 243}
+	// destination := net.IP{104, 244, 42, 65}
 
-	c, err := net.ListenPacket("ip4:1", "0.0.0.0")
+	listener, err := net.ListenPacket("ip4:1", "0.0.0.0")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer c.Close()
-	r, err := ipv4.NewRawConn(c)
+	defer listener.Close()
+
+	rawCon, err := ipv4.NewRawConn(listener)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	ipHeader, icmp := buildICMPRequest(destination, 1)
-
-	cm := &ipv4.ControlMessage{}
-
-	if err := r.WriteTo(ipHeader, icmp, cm); err != nil {
-		log.Println(err)
+	if err := rawCon.SetControlMessage(ipv4.FlagTTL|ipv4.FlagSrc|ipv4.FlagDst|ipv4.FlagInterface, true); err != nil {
+		log.Fatal(err)
 	}
 
-	responseBytes := make([]byte, 1500)
-	responseHeader, _, _, err := r.ReadFrom(responseBytes)
-	if err != nil {
-		log.Println(err)
-	}
+	// t := time.Now().Add(5 * time.Second)
+	// rawCon.SetReadDeadline(t)
 
-	log.Println(responseHeader.Src)
+	for ttl := 1; ttl <= 64; ttl++ {
+		log.Println("sending", ttl)
+		sendICMP(rawCon, destination, ttl)
+	}
 
 }
